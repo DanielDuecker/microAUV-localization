@@ -6,14 +6,11 @@ from pyquaternion import Quaternion
 import rospy
 import tf
 
-from geometry_msgs.msg import Pose, PoseArray, PoseStamped, TwistStamped
+from geometry_msgs.msg import PoseStamped, TwistStamped
 from apriltag_ros.msg import AprilTagDetectionArray
-from apriltag_ros.msg import AprilTagDetection
-from visualization_msgs.msg import Marker, MarkerArray
+from visualization_msgs.msg import MarkerArray
 from sensor_msgs.msg import Imu
-from mavros_msgs.srv import SetMode
 from numpy import genfromtxt
-import os
 
 # NUM_P = 100
 state_dim = 3  # x, y, z
@@ -24,14 +21,10 @@ state_dim = 3  # x, y, z
 # cov_mat = 0.05
 cov_mat = 0.05
 old_yaw = 0
-# set_mode_srv = rospy.ServiceProxy('mavros/set_mode', SetMode)
-# res = set_mode_srv(0, " OFFBOARD")
 
 rospack = rospkg.RosPack()
 tags = None
-# tags[:, 1] += 0.08  # to shift x-value according to gantry origin
-# tags[:,2] += 0.02  # to shift y-value according to gantry origin
-# print(tags)
+
 rviz = False
 
 
@@ -39,8 +32,6 @@ def callback_imu(msg, tmp_list):
     global old_yaw
     [ekf, publisher_position, publisher_mavros, broadcaster,
      publisher_marker, publisher_twist] = tmp_list
-    # print(np.sqrt((msg.linear_acceleration.x/50)**2+(msg.linear_acceleration.y/50)**2+(msg.linear_acceleration.z/50)**2))
-    # ekf.prediction(tmp[0], tmp[1], tmp[2] - 9.81)
     x_rot_vel = msg.angular_velocity.x
     y_rot_vel = msg.angular_velocity.y
     z_rot_vel = msg.angular_velocity.z
@@ -95,14 +86,13 @@ def callback_imu(msg, tmp_list):
 
 
 def callback_orientation(msg, ekf):
+    # gets the current orientation state of the px4
     rotation_body_frame = Quaternion(w=msg.pose.orientation.w,
                                      x=msg.pose.orientation.x,
                                      y=msg.pose.orientation.y,
                                      z=msg.pose.orientation.z)
-    yaw, pitch, roll = rotation_body_frame.inverse.yaw_pitch_roll
-    yaw_current = -yaw
-    pitch_current = -pitch
-    roll_current = -((roll + 360 / 180.0 * np.pi) % (np.pi * 2) - 180 / 180.0 * np.pi)
+    yaw_current, pitch_current, roll_current = rotation_body_frame.yaw_pitch_roll
+    roll_current = -roll_current
     ekf.current_rotation(yaw_current, pitch_current, roll_current)
 
 
@@ -127,7 +117,7 @@ def callback(msg, tmp_list):
             tag_id = int(tag.id[0])
             tag_distance_cam = np.array(([tag.pose.pose.pose.position.x * 1.05,
                                           tag.pose.pose.pose.position.y * 1.1,
-                                          tag.pose.pose.pose.position.z]))  # Achtung hier ist die 0.1 wegen der kamera position hinzugefuegt
+                                          tag.pose.pose.pose.position.z]))
             measurements[i, 0] = np.linalg.norm(tag_distance_cam)
             tmpquat = Quaternion(w=tag.pose.pose.pose.orientation.w,
                                  x=tag.pose.pose.pose.orientation.x,
@@ -140,11 +130,7 @@ def callback(msg, tmp_list):
             measurements[i, 1:4] = tags[index, 1:4]
         # ekf update step
         ekf.update(measurements)
-        #if number_of_unseen_tags > 0 and num_meas > 2:
-        #    for i in range(number_of_unseen_tags):
-        #        ekf.update(measurements)
-        #    number_of_unseen_tags = 0
-
+        # calculate mean angle of all seen tags
         yaw_list = np.asarray(orientation_yaw_pitch_roll[:, 0])
         yaw = np.arctan2(np.mean(np.sin(yaw_list)), np.mean(np.cos(yaw_list)))
         pitch = np.mean(orientation_yaw_pitch_roll[:, 1])
@@ -181,7 +167,8 @@ def main():
     global tags
     rospy.init_node('ekf_node')
     try:
-        which_calibration=rospy.get_param('~calibration')
+        #which_calibration=rospy.get_param('~calibration')
+        which_calibration = "water_tank"
     except KeyError:
         print("################## You have to set a calibration parameter ###########################")
         exit(-1)

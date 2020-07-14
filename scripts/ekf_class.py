@@ -33,7 +33,7 @@ class ExtendedKalmanFilter(object):
 
         # measurement noise
         # --> see measurement_covariance_model
-        self.__sig_r = 1
+        self.__sig_r = 0.5
         self.__r_mat = self.__sig_r ** 2
         # measurement noise velocity
         self.__sig_v = 0.5
@@ -104,13 +104,9 @@ class ExtendedKalmanFilter(object):
 
         for i, tag in enumerate(vis_tags):
             tag_pos = tag[1:4]
-            # print("tag pos + " + str(tag_pos))
-            # print("x= " + str(x))
-            # r = sqrt((x - x_tag) ^ 2 + (y - y_tag) ^ 2 + (z - z_tag) ^ 2)
             r_dist = np.sqrt((x[0] - tag_pos[0]) ** 2 +
                              (x[1] - tag_pos[1]) ** 2 +
                              (x[2] - tag_pos[2]) ** 2)
-            # print ("r = " + str(r_dist))
             z[i, 0] = r_dist
 
         return z
@@ -156,20 +152,15 @@ class ExtendedKalmanFilter(object):
         self.__last_time_stamp_prediction = rospy.get_time()
         if delta_t == 0:
             delta_t = 0.02
-        # print("current_time:", rospy.get_time())
-        # print("delta_t", delta_t)
         self.yaw_current = self.yaw_current - z_rot_vel * delta_t
         self.pitch_current = self.pitch_current - y_rot_vel * delta_t  # nicht sicher ob das richtig ist
         self.roll_current = self.roll_current + x_rot_vel * delta_t  # nicht sicher ob das richtig ist
         rotation = self.yaw_pitch_roll_to_quat(self.yaw_current, self.pitch_current, self.roll_current)
         update_x_y_z = rotation.rotate(
             np.asarray([[self.__x_est[3] * delta_t], [0], [0]]))  # yaw_pitch_roll_to_quat
-        # update_x_y_z = rotation.rotate(np.asarray([[0], [0], [0]]))
         update_x_y_z_v = np.asarray([[update_x_y_z[0]], [update_x_y_z[1]], [update_x_y_z[2]], [0]])
-        # print(update_x_y_z_v)
         self.__x_est = np.matmul(self.__f_mat, self.__x_est) + update_x_y_z_v  # prediction = f * x_est + u
         self.__p_mat = np.matmul(self.__f_mat, np.matmul(self.__p_mat, np.transpose(self.__f_mat))) + self.__q_mat
-        # print(self.__p_mat)
         return True
 
     def update(self, z_meas_tags):
@@ -177,75 +168,51 @@ class ExtendedKalmanFilter(object):
         num_meas = z_meas_tags.shape[0]
         # get new measurement
         z_meas = z_meas_tags[:, 0].reshape(num_meas, 1)
-        # print("z_meas", np.transpose(z_meas.round(decimals=3)))
+
         # estimate measurement from x_est
         z_est = self.h(self.__x_est[0:3], z_meas_tags)
         z_tild = z_meas - z_est
-        # print("z_est", np.transpose(z_est.round(decimals=3)))
-        # print("z_tild", np.transpose(z_tild.round(decimals=3)))
+
         # calc K-gain
         h_jac_mat = self.h_jacobian(self.__x_est[0:3], z_meas_tags)
-        # print("h_jac_mat", h_jac_mat)
         k_mat = np.zeros((3, num_meas))
-        r_mat_temp = np.eye(num_meas) * self.__r_mat  # same measurement noise for all measurements, for the moment
 
-        s_mat = np.dot(h_jac_mat, np.dot(self.__p_mat[0:3, 0:3], h_jac_mat.transpose())) + r_mat_temp
-        # print("s_mat", s_mat)
-        s_diag = np.diag(s_mat)
-        # compute k_mat in an interative way
+
+        # compute s_mat and k_mat in an interative way
         for i_tag in range(num_meas):
-            k_mat[:, i_tag] = np.dot(self.__p_mat[0:3, 0:3], h_jac_mat[i_tag, :].transpose()) / s_diag[
-                i_tag]  # 1/s scalar since s_mat is dim = 1x1
+            s_mat = np.dot(h_jac_mat[i_tag, :],
+                           np.dot(self.__p_mat[0:3, 0:3], h_jac_mat[i_tag, :].transpose())) + self.__r_mat * np.linalg.norm(
+                z_meas_tags[i_tag, 0:3]) / z_meas_tags[i_tag, 2]
+            k_mat[:, i_tag] = np.dot(self.__p_mat[0:3, 0:3],
+                                     h_jac_mat[i_tag, :].transpose()) / s_mat  # 1/s scalar since s_mat is dim = 1x1
         # check distance to tag and reject far away tags
         b_tag_in_range = z_meas <= self.__max_dist_to_tag
-        # print("k_mat", k_mat)
-        # print("bebfore update x_est:", self.__x_est)
         self.__x_est[0:3] = self.__x_est[0:3] + np.matmul(k_mat[:, b_tag_in_range[:, 0]],
                                                           z_tild[b_tag_in_range]).reshape(
             (3, 1))  # = x_est + k * y_tild
-        # print("after update x_est:", self.__x_est)
         # velocity calculation:
+
         # innovation y=z-h(x)
-
-        # angle_velocity = np.arctan2(self.__x_est[1] - self.__x_est_last_step[1],
-        #                            self.__x_est[0] - self.__x_est_last_step[0])
-
-        # scaling = np.cos(
-        #    np.arctan2(np.sin(angle_velocity - self.yaw_current), np.cos(angle_velocity - self.yaw_current)))
-        # if abs(np.arctan2(np.sin(angle_velocity - self.yaw_current),
-        #                  np.cos(angle_velocity - self.yaw_current))) > np.pi / 2:
-        #    scaling = 0
-        # print(scaling)
         delta_t = rospy.get_time() - self.__last_time_stamp_update
         if delta_t == 0:
             delta_t = 0.1
         z_vel = np.linalg.norm(self.__x_est[0:3] - self.__x_est_last_step[0:3]) / delta_t / (
                 self.__counter_not_seen_any_tags + 1)  # * scaling
-        z_vel = 0  # TODO FOR REAL TEST REMOVE
+        #z_vel = 0  # TODO FOR REAL TEST REMOVE
         if self.__counter_not_seen_any_tags > 0:
             self.__counter_not_seen_any_tags = self.__counter_not_seen_any_tags - 1
         if z_vel > 0.7:
-            # print("vel to high:", z_vel,delta_t)
             z_vel = 0.7
-            # self.__x_est[3] = 0
         y_vel = z_vel - self.__x_est[3]
-        # gain_vel_covarianz=(1+abs(np.linalg.norm(self.__x_est[0:3] - self.__x_est_last_step[0:3]))*100)
-        # print(gain_vel_covarianz)
         s_k_mat = self.__p_mat[3, 3] + self.__v_mat
         kalman_gain_v = self.__p_mat[3, 3] / s_k_mat
         p_update = np.zeros((4, 4))
         self.__x_est[3] = self.__x_est[3] + np.matmul(kalman_gain_v, y_vel)
-        # self.__p_mat[3,3] = np.matmul((np.eye(3)-kalman_gain_v),self.__p_mat[3,3])
         if abs(self.__x_est[3]) > 1:
             self.__x_est[3] = self.__x_est[3] / abs(self.__x_est[3])
         p_update[0:3, 0:3] = (np.eye(3) - np.matmul(k_mat[:, b_tag_in_range[:, 0]], h_jac_mat[b_tag_in_range[:, 0], :]))
         p_update[3, 3] = (1 - kalman_gain_v)
         self.__p_mat = np.matmul(p_update, self.__p_mat)
-        # if z_vel > 1:
-        # print("vel to high:", z_vel,delta_t)
-        #    self.__x_est[3] = 0
-        # print("after estimation")
-        # print(self.__x_est)
         # save last state
         self.__x_est_last_step = np.copy(self.__x_est)
         self.__last_time_stamp_update = rospy.get_time()
